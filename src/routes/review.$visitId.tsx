@@ -350,6 +350,11 @@ function ReviewPage() {
   const structured = (visit.structured_summary ?? null) as Record<string, unknown> | null;
   const drug = (visit.drug_safety_info ?? null) as { medicine?: string; warnings?: string[] } | null;
   const isRed = tier === "RED";
+  const conditionData = (visit.chronic_conditions ?? null) as
+    | { conditions?: Array<{ condition_name: string }>; alerts?: Array<{ condition: string; note: string }>; guardrails?: string[] }
+    | null;
+  const historyAlerts = conditionData?.alerts ?? [];
+  const pregnancy = (visit.pregnancy_status ?? null) as PregnancyStatus | null;
   const rawMedSuggestion = (visit.medicine_suggestion ?? null) as {
     status?: string;
     message?: string;
@@ -362,9 +367,9 @@ function ReviewPage() {
   const fallbackClinical = useMemo(() => {
     const rawSymptoms = Array.isArray(structured?.symptoms)
       ? (structured.symptoms as string[])
-      : [visit.symptoms_text];
+      : visit.symptoms_text ? [visit.symptoms_text] : [];
     return getClinicalMedicineRecommendations({
-      symptomsText: visit.symptoms_text,
+      symptomsText: visit.symptoms_text || "",
       structuredSymptoms: rawSymptoms,
       historyText: visit.history_text || "",
       age: patient?.age,
@@ -408,11 +413,6 @@ function ReviewPage() {
         .eq("id", visit.id);
     }
   }, [visit.id, visit.medicine_suggestion, fallbackClinical, activeProtocolMatched, activeProtocolText, activeAyurvedicRemedy, activeAyurvedicCondition]);
-  const conditionData = (visit.chronic_conditions ?? null) as
-    | { conditions?: Array<{ condition_name: string }>; alerts?: Array<{ condition: string; note: string }>; guardrails?: string[] }
-    | null;
-  const historyAlerts = conditionData?.alerts ?? [];
-  const pregnancy = (visit.pregnancy_status ?? null) as PregnancyStatus | null;
 
   return (
     <AppShell>
