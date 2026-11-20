@@ -83,7 +83,12 @@ export function VoiceRecorder({ field, languageHint, onTranscript }: Props) {
       onTranscript(result.transcript, result.detected_language);
       toast.success("Voice note transcribed — review and edit before submitting.");
     } catch (error) {
-      toast.error(error instanceof Error ? error.message : "Could not transcribe that recording.");
+      const errMsg = error instanceof Error ? error.message : "";
+      if (errMsg.includes("Gemini API key") || errMsg.includes("not configured")) {
+        toast.info("Voice transcription requires a Gemini API key. You can type directly in the field.");
+      } else {
+        toast.error(errMsg || "Could not transcribe that recording.");
+      }
       console.error(error);
     } finally {
       setBusy(false);

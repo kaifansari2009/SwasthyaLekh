@@ -24,8 +24,13 @@ export function SpeakButton({ text, language, label = "Play aloud", showTranscri
   const cacheRef = useRef<string | null>(null);
 
   function stop() {
-    audioRef.current?.pause();
-    audioRef.current = null;
+    if (audioRef.current) {
+      audioRef.current.pause();
+      audioRef.current = null;
+    }
+    if (typeof window !== "undefined" && "speechSynthesis" in window) {
+      window.speechSynthesis.cancel();
+    }
     setPlaying(false);
   }
 
@@ -37,14 +42,38 @@ export function SpeakButton({ text, language, label = "Play aloud", showTranscri
     setBusy(true);
     try {
       if (!cacheRef.current) {
-        const result = await run({ data: { text: text.slice(0, 4000), language } });
-        cacheRef.current = `data:audio/mpeg;base64,${result.audio_base64}`;
+        try {
+          const result = await run({ data: { text: text.slice(0, 4000), language } });
+          if (result?.audio_base64) {
+            cacheRef.current = `data:audio/mpeg;base64,${result.audio_base64}`;
+          }
+        } catch (serverErr) {
+          console.warn("[SpeakButton] Server TTS unavailable, falling back to browser SpeechSynthesis:", serverErr);
+        }
       }
-      const audio = new Audio(cacheRef.current);
-      audioRef.current = audio;
-      audio.onended = () => setPlaying(false);
-      await audio.play();
-      setPlaying(true);
+
+      if (cacheRef.current) {
+        const audio = new Audio(cacheRef.current);
+        audioRef.current = audio;
+        audio.onended = () => setPlaying(false);
+        await audio.play();
+        setPlaying(true);
+      } else if (typeof window !== "undefined" && "speechSynthesis" in window) {
+        // Native browser SpeechSynthesis fallback (100% free, works offline, no API key needed!)
+        window.speechSynthesis.cancel();
+        const utterance = new SpeechSynthesisUtterance(text);
+        utterance.lang = localeFor(language);
+        utterance.rate = 0.95;
+        utterance.onend = () => setPlaying(false);
+        utterance.onerror = (e) => {
+          console.warn("[SpeakButton] SpeechSynthesis utterance error:", e);
+          setPlaying(false);
+        };
+        window.speechSynthesis.speak(utterance);
+        setPlaying(true);
+      } else {
+        throw new Error("Speech playback is not supported on this device/browser.");
+      }
     } catch (error) {
       toast.error(error instanceof Error ? error.message : "Could not play this response.");
       console.error(error);
