@@ -65,11 +65,11 @@ export async function runIntakePipeline(input: IntakeInput, userId: string) {
     .select("full_name, health_centre")
     .eq("id", userId)
     .maybeSingle();
-  const centre = profile?.health_centre || "General Health Centre";
+  const centre = profile?.health_centre?.trim() || "Rampur Health Centre";
   const workerName = profile?.full_name || "Health worker";
   if (!profile?.health_centre && userId) {
     try {
-      await supabaseAdmin.from("profiles").update({ health_centre: centre }).eq("id", userId);
+      await supabaseAdmin.from("profiles").upsert({ id: userId, health_centre: centre }, { onConflict: "id" });
     } catch {
       // Non-fatal if update fails
     }

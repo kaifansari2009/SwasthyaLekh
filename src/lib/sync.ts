@@ -56,7 +56,30 @@ export async function syncSinglePendingIntake(
       return { success: false, error: "Authentication required to sync records. Please sign in." };
     }
 
-    const centre = profile?.health_centre || "General Health Centre";
+    // Ensure profile in database has a valid health_centre matching RLS requirement
+    const defaultCentre = "Rampur Health Centre";
+    let centre = profile?.health_centre?.trim();
+    if (!centre) {
+      const { data: dbProf } = await supabase
+        .from("profiles")
+        .select("health_centre")
+        .eq("id", userId)
+        .maybeSingle();
+      centre = dbProf?.health_centre?.trim();
+    }
+
+    if (!centre) {
+      centre = defaultCentre;
+      try {
+        await supabase
+          .from("profiles")
+          .update({ health_centre: centre })
+          .eq("id", userId);
+      } catch (profErr) {
+        console.warn("[sync] Failed to auto-set profile health_centre:", profErr);
+      }
+    }
+
     const mobile = item.mobile_number.trim();
 
     // Check existing patient or insert

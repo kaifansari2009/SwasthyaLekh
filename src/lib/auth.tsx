@@ -56,7 +56,42 @@ export function AuthProvider({ children }: { children: ReactNode }) {
         .maybeSingle(),
       supabase.from("user_roles").select("role").eq("user_id", userId),
     ]);
-    setProfile((prof as Profile) ?? null);
+
+    let loadedProfile = (prof as Profile) ?? null;
+    const defaultCentre = "Rampur Health Centre";
+    if (!loadedProfile) {
+      try {
+        const { data: createdProf } = await supabase
+          .from("profiles")
+          .upsert(
+            {
+              id: userId,
+              full_name: "Staff",
+              health_centre: defaultCentre,
+            },
+            { onConflict: "id" },
+          )
+          .select("id, full_name, health_centre, ui_language, preferred_patient_language, notify_red, notify_consultation, notify_followup")
+          .maybeSingle();
+        if (createdProf) {
+          loadedProfile = createdProf as Profile;
+        }
+      } catch (e) {
+        console.warn("Failed to create profile:", e);
+      }
+    } else if (!loadedProfile.health_centre || !loadedProfile.health_centre.trim()) {
+      try {
+        await supabase
+          .from("profiles")
+          .update({ health_centre: defaultCentre })
+          .eq("id", userId);
+        loadedProfile = { ...loadedProfile, health_centre: defaultCentre };
+      } catch (e) {
+        console.warn("Failed to update health_centre on profile:", e);
+      }
+    }
+
+    setProfile(loadedProfile);
     const list = (roles ?? []).map((r) => r.role as Role);
     setRole(list.includes("doctor") ? "doctor" : list.includes("admin") ? "admin" : list[0] ?? null);
   }
