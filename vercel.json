@@ -2,8 +2,17 @@
   "$schema": "https://openapi.vercel.sh/vercel.json",
   "build": {
     "env": {
-      "DANGEROUSLY_DEPLOY_VULNERABLE_TANSTACK_START_XSS": "1"
+      "DANGEROUSLY_DEPLOY_VULNERABLE_TANSTACK_START_XSS": "1",
+      "VITE_SUPABASE_URL": "https://jbbhqtjhfajohpwwywka.supabase.co",
+      "VITE_SUPABASE_PUBLISHABLE_KEY": "sb_publishable_k_2LpMcf6aH-XMyiuDmWBA_kSyUrSls",
+      "SUPABASE_URL": "https://jbbhqtjhfajohpwwywka.supabase.co",
+      "SUPABASE_PUBLISHABLE_KEY": "sb_publishable_k_2LpMcf6aH-XMyiuDmWBA_kSyUrSls"
     }
+  },
+  "env": {
+    "VITE_SUPABASE_URL": "https://jbbhqtjhfajohpwwywka.supabase.co",
+    "VITE_SUPABASE_PUBLISHABLE_KEY": "sb_publishable_k_2LpMcf6aH-XMyiuDmWBA_kSyUrSls",
+    "SUPABASE_URL": "https://jbbhqtjhfajohpwwywka.supabase.co",
+    "SUPABASE_PUBLISHABLE_KEY": "sb_publishable_k_2LpMcf6aH-XMyiuDmWBA_kSyUrSls"
   }
 }
-

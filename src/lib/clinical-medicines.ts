@@ -265,3 +265,4 @@ export function getClinicalMedicineRecommendations(args: {
     ayurvedicCondition: detectedCondition,
   };
 }
+

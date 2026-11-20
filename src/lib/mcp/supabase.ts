@@ -19,10 +19,11 @@ function configuredEnv(names: readonly string[]): string | undefined {
   return undefined;
 }
 
+import { resolveSupabaseUrl, resolveSupabasePublishableKey } from "@/integrations/supabase/config";
+
 function supabaseProjectUrl(): string {
   const url = configuredEnv(["SUPABASE_URL", "VITE_SUPABASE_URL"]);
-  if (!url) throw new Error("SUPABASE_URL (or VITE_SUPABASE_URL) is required");
-  return url;
+  return url || resolveSupabaseUrl();
 }
 
 function supabasePublishableKey(): string {
@@ -45,7 +46,7 @@ function supabasePublishableKey(): string {
   }
   const legacy = configuredEnv(["SUPABASE_ANON_KEY", "VITE_SUPABASE_ANON_KEY"]);
   if (legacy) return legacy;
-  throw new Error("SUPABASE_PUBLISHABLE_KEY, SUPABASE_PUBLISHABLE_KEYS, or SUPABASE_ANON_KEY is required");
+  return resolveSupabasePublishableKey();
 }
 
 export function supabaseForUser(ctx: ToolContext) {
