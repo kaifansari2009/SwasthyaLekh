@@ -1,0 +1,451 @@
+import { geminiFetch } from "./gemini.server";
+import { claudeChat, CLAUDE_MODEL } from "./claude.server";
+import { supabaseAdmin } from "@/integrations/supabase/client.server";
+import { hasCondition, type ChronicCondition, type PregnancyStatus } from "./conditions";
+
+const MODEL = "google/gemini-2.5-flash";
+
+type ContentBlock =
+  | { type: "text"; text: string }
+  | { type: "image_url"; image_url: { url: string } };
+
+async function callGemini(
+  content: string | ContentBlock[],
+  system: string,
+  jsonMode = false,
+): Promise<string> {
+  const res = await geminiFetch("/chat/completions", ({
+      model: MODEL,
+      messages: [
+        { role: "system", content: system },
+        { role: "user", content },
+      ],
+      ...(jsonMode ? { response_format: { type: "json_object" } } : {}),
+  }));
+
+  if (res.status === 429) throw new Error("AI rate limit reached. Please retry in a moment.");
+  if (res.status === 402) throw new Error("AI credits exhausted. Add credits to continue.");
+  if (!res.ok) throw new Error(`AI request failed (${res.status})`);
+
+  const json = (await res.json()) as {
+    choices?: Array<{ message?: { content?: string } }>;
+  };
+  return json.choices?.[0]?.message?.content ?? "";
+}
+
+function parseJson<T>(raw: string, fallback: T): T {
+  const cleaned = raw
+    .trim()
+    .replace(/^```(?:json)?/i, "")
+    .replace(/```$/, "");
+  try {
+    return JSON.parse(cleaned) as T;
+  } catch {
+    const match = cleaned.match(/\{[\s\S]*\}/);
+    if (match) {
+      try {
+        return JSON.parse(match[0]) as T;
+      } catch {
+        return fallback;
+      }
+    }
+    return fallback;
+  }
+}
+
+import {
+  scoreRisk,
+  applyConditionModifiers,
+  extractDays,
+  escalate,
+  type RiskResult,
+  type ConditionContext,
+  type StructuredSummary,
+  type Vitals,
+} from "./triage-scoring";
+export {
+  scoreRisk,
+  applyConditionModifiers,
+  extractDays,
+  escalate,
+  type RiskResult,
+  type ConditionContext,
+  type StructuredSummary,
+  type Vitals,
+};
+
+/* ---------------- Step 0: image understanding (multimodal) ---------------- */
+
+export async function analyzeImage(imagePath: string): Promise<string | null> {
+  const { data, error } = await supabaseAdmin.storage
+    .from("clinic-uploads")
+    .download(imagePath);
+  if (error || !data) return null;
+
+  const buffer = Buffer.from(await data.arrayBuffer());
+  const mime = data.type || "image/jpeg";
+  const dataUrl = `data:${mime};base64,${buffer.toString("base64")}`;
+
+  return callGemini(
+    [
+      {
+        type: "text",
+        text: "If this is a wound or skin photo, describe only observable facts: body location, size estimate, colour, discharge, swelling, surrounding skin. Do NOT diagnose. If this is a prescription or medical document, transcribe the readable text verbatim. Answer in under 120 words.",
+      },
+      { type: "image_url", image_url: { url: dataUrl } },
+    ],
+    "You are a careful clinical documentation assistant for a rural health worker. You describe or transcribe. You never diagnose.",
+  );
+}
+
+export function sanitizeText(str: string | undefined | null, maxLength = 2000): string {
+  if (!str) return "";
+  // Strip control characters except standard newlines and tabs
+  const cleaned = str.replace(/[\x00-\x08\x0B\x0C\x0E-\x1F\x7F]/g, "");
+  return cleaned.trim().slice(0, maxLength);
+}
+
+/* ---------------- Step 1: structuring ---------------- */
+
+export async function structureIntake(input: {
+  name: string;
+  age: number;
+  language: string;
+  symptoms: string;
+  duration: string;
+  history: string;
+  vitals: Vitals;
+  imageAnalysis?: string | null;
+}): Promise<StructuredSummary> {
+  const sanitizedInput = {
+    name: sanitizeText(input.name, 150),
+    age: Math.min(Math.max(Number(input.age) || 0, 0), 120),
+    language: sanitizeText(input.language, 50),
+    symptoms: sanitizeText(input.symptoms, 2500),
+    duration: sanitizeText(input.duration, 150),
+    history: sanitizeText(input.history, 2500),
+    vitals: input.vitals,
+    imageAnalysis: input.imageAnalysis ? sanitizeText(input.imageAnalysis, 1500) : null,
+  };
+
+  const raw = await callGemini(
+    JSON.stringify(sanitizedInput),
+    `Extract structured clinical intake data from the health worker's raw text. It may be in English, Hindi (Devanagari), Hinglish (Hindi in Roman script), Bangla, Tamil, Telugu, Marathi, and languages may be mixed within one note.
+Return ONLY JSON with this exact shape:
+{"symptoms":[string],"duration":string,"age":number,"vitals":{"temp":number|null,"bp":string|null,"pulse":number|null,"spo2":number|null},"history":string,"detected_language":string,"confirmation_message":string}
+The input includes a "language" hint chosen by the health worker; when it is "Auto-detect", detect the language yourself instead. "confirmation_message" must be a short (max 30 words) confirmation that the intake was received, written in the hinted language, or — when the hint is "Auto-detect" — in the SAME language and script the health worker used (reply in Roman-script Hinglish if they wrote Hinglish). "detected_language" is the language name actually detected in the note, e.g. "English", "Hindi", "Hinglish", "Bangla", "Tamil", "Telugu", "Marathi". Do not diagnose.`,
+    true,
+  );
+
+  const parsed = parseJson<Partial<StructuredSummary>>(raw, {});
+  return {
+    symptoms: parsed.symptoms ?? [input.symptoms],
+    duration: parsed.duration ?? input.duration,
+    age: parsed.age ?? input.age,
+    vitals: { ...input.vitals, ...(parsed.vitals ?? {}) },
+    history: parsed.history ?? input.history,
+    detected_language: parsed.detected_language ?? input.language,
+    confirmation_message: parsed.confirmation_message ?? "Intake recorded.",
+  };
+}
+
+/* ---------------- Step 2: reasoning (no tiering) ---------------- */
+
+const FEW_SHOTS = `Examples of symptom pattern -> likely condition CATEGORY (never a diagnosis):
+- fever + cough + body ache, 2 days -> category: common viral respiratory illness
+- watery stools + vomiting + thirst -> category: acute gastroenteritis with dehydration risk
+- burning urination + lower abdominal discomfort -> category: possible urinary tract irritation
+- itchy rash after new soap -> category: contact skin irritation
+- shallow cut with mild bleeding -> category: minor soft-tissue injury`;
+
+const REASONING_SYSTEM = `You are supporting a rural health worker. Write a SHORT preliminary assessment (max 120 words) for a doctor to review.
+${FEW_SHOTS}
+Rules: never state a definitive diagnosis. Use hedged wording only: "consistent with", "may indicate", "warrants review for". Do NOT assign any risk level, tier, urgency rating or triage colour. Do NOT recommend medicines. Plain prose, no markdown headings.`;
+
+export type ReasoningResult = { text: string; provider: string; fallback: boolean };
+
+/**
+ * Symptom-reasoning node — routed through Claude. If Claude fails we fall back to
+ * Gemini, but the fallback is logged AND surfaced in the provider tag so it is
+ * never silent.
+ */
+export async function reasonAssessment(
+  structured: StructuredSummary,
+  imageAnalysis?: string | null,
+): Promise<ReasoningResult> {
+  const payload = JSON.stringify({ structured, image_observation: imageAnalysis ?? null });
+  try {
+    const text = await claudeChat({ system: REASONING_SYSTEM, content: payload });
+    if (!text) throw new Error("Claude returned an empty assessment");
+    return { text, provider: `Claude (${CLAUDE_MODEL})`, fallback: false };
+  } catch (error) {
+    console.error(
+      `[provider-fallback] Symptom reasoning did NOT use Claude — falling back to Gemini. Reason: ${
+        error instanceof Error ? error.message : String(error)
+      }`,
+    );
+    const text = await callGemini(payload, REASONING_SYSTEM);
+    return { text, provider: `Gemini (${MODEL}) — Claude fallback`, fallback: true };
+  }
+}
+
+/* ---------------- Critical-condition escalation check (Claude) ---------------- */
+
+export type CriticalCheck = {
+  critical: boolean;
+  reason: string | null;
+  provider: string;
+  fallback: boolean;
+};
+
+const CRITICAL_SYSTEM = `You are a conservative clinical safety checker for a rural triage system.
+Decide ONLY whether the described presentation shows signs of a potentially life-threatening or rapidly deteriorating condition that must be seen urgently.
+Return ONLY JSON: {"critical":boolean,"reason":string}
+"reason" is max 20 words, plain language, citing the specific finding. If nothing critical is present, set critical=false and reason="".
+Never diagnose, never name a triage colour, never recommend medicines.`;
+
+/**
+ * Advisory only: this can raise the deterministic tier, never lower it.
+ */
+export async function criticalConditionCheck(
+  structured: StructuredSummary,
+  symptomsText: string,
+  imageAnalysis?: string | null,
+): Promise<CriticalCheck> {
+  const payload = JSON.stringify({
+    structured,
+    raw_symptoms: symptomsText,
+    image_observation: imageAnalysis ?? null,
+  });
+  try {
+    const raw = await claudeChat({ system: CRITICAL_SYSTEM, content: payload, maxTokens: 300 });
+    const parsed = parseJson<{ critical?: boolean; reason?: string }>(raw, {});
+    return {
+      critical: parsed.critical === true,
+      reason: parsed.reason?.trim() || null,
+      provider: `Claude (${CLAUDE_MODEL})`,
+      fallback: false,
+    };
+  } catch (error) {
+    console.error(
+      `[provider-fallback] Critical-condition check did NOT use Claude — falling back to Gemini. Reason: ${
+        error instanceof Error ? error.message : String(error)
+      }`,
+    );
+    const raw = await callGemini(payload, CRITICAL_SYSTEM, true);
+    const parsed = parseJson<{ critical?: boolean; reason?: string }>(raw, {});
+    return {
+      critical: parsed.critical === true,
+      reason: parsed.reason?.trim() || null,
+      provider: `Gemini (${MODEL}) — Claude fallback`,
+      fallback: true,
+    };
+  }
+}
+
+/* ---------------- Step 3: deterministic risk scoring ---------------- */
+// (scoreRisk, applyConditionModifiers, extractDays, escalate are imported from ./triage-scoring)
+
+/* ---------------- Condition-aware suggestion guardrails ---------------- */
+
+/** Returns a caution note when a medicine/remedy may be unsafe for a flagged condition. */
+export function suggestionGuardrail(
+  suggestion: string,
+  ctx: ConditionContext,
+): string | null {
+  const s = suggestion.toLowerCase();
+  if (ctx.pregnancy?.status === "Pregnant" || ctx.pregnancy?.status === "Not Sure") {
+    if (/pregnan|nursing mother|teratogen|fetal|first trimester/.test(s)) {
+      return "Suggestion withheld — patient's pregnancy status may require doctor-specific guidance for this medicine/remedy.";
+    }
+  }
+  if (hasCondition(ctx.chronic, "diabet") && /sugar|honey|jaggery|syrup|molasses|sweet/.test(s)) {
+    return "Suggestion withheld — patient's diabetes may require doctor-specific guidance for this medicine/remedy.";
+  }
+  if (hasCondition(ctx.chronic, "hypertension") && /salt|sodium|liquorice|licorice|pseudoephedrine/.test(s)) {
+    return "Suggestion withheld — patient's hypertension may require doctor-specific guidance for this medicine/remedy.";
+  }
+  if (hasCondition(ctx.chronic, "kidney") && /nsaid|ibuprofen|renal|kidney/.test(s)) {
+    return "Suggestion withheld — patient's kidney disease may require doctor-specific guidance for this medicine/remedy.";
+  }
+  if (hasCondition(ctx.chronic, "asthma") && /aspirin|nsaid|bronchospasm/.test(s)) {
+    return "Suggestion withheld — patient's asthma may require doctor-specific guidance for this medicine/remedy.";
+  }
+  return null;
+}
+
+/* ---------------- Relevant medical history alerts (cautious, non-directive) ---------------- */
+
+export type HistoryAlert = { condition: string; note: string };
+
+export async function historyAlerts(
+  ctx: ConditionContext,
+  symptomsText: string,
+  contributingRules: string[],
+): Promise<HistoryAlert[]> {
+  const items = [
+    ...ctx.chronic.map((c) => c.condition_name),
+    ...(ctx.pregnancy && ctx.pregnancy.status !== "Not Pregnant"
+      ? [`Pregnancy — ${ctx.pregnancy.status}${ctx.pregnancy.trimester ? ` (${ctx.pregnancy.trimester} trimester)` : ""}`]
+      : []),
+  ];
+  if (items.length === 0) return [];
+
+  const fallback = items.map((condition) => ({
+    condition,
+    note: `${condition} is on file for this patient — please consider how it may interact with the current presentation.`,
+  }));
+
+  try {
+    const raw = await callGemini(
+      JSON.stringify({ conditions: items, symptoms: symptomsText, triggered_rules: contributingRules }),
+      `For each listed chronic condition or pregnancy status, write ONE short sentence (max 25 words) of cautious clinical CONTEXT for a doctor explaining why it may be relevant to the reported symptoms.
+Return ONLY JSON: {"alerts":[{"condition":string,"note":string}]}
+Rules: never diagnose, never give a directive or treatment instruction, never assign a risk tier. Phrase as context that defers to the doctor's judgment.`,
+      true,
+    );
+    const parsed = parseJson<{ alerts?: HistoryAlert[] }>(raw, {});
+    const alerts = (parsed.alerts ?? []).filter((a) => a?.condition && a?.note);
+    return alerts.length > 0 ? alerts : fallback;
+  } catch {
+    return fallback;
+  }
+}
+
+/* ---------------- Step 4: protocol lookup (all tiers, tier-scoped) ---------------- */
+
+/** Rows whose condition_name carries this prefix are emergency stabilization protocols (RED only). */
+export const STABILIZATION_PREFIX = "Emergency stabilization";
+
+export function isStabilizationRow(conditionName: string) {
+  return conditionName.toLowerCase().startsWith(STABILIZATION_PREFIX.toLowerCase());
+}
+
+type ProtocolRow = {
+  condition_name: string;
+  keywords: string[] | null;
+  otc_medicine: string | null;
+  protocol_text: string;
+};
+
+async function bestProtocolMatch(
+  structured: StructuredSummary,
+  symptomsText: string,
+  filter: (row: ProtocolRow) => boolean,
+): Promise<ProtocolRow | null> {
+  const { data } = await supabaseAdmin
+    .from("first_aid_protocols")
+    .select("condition_name, keywords, otc_medicine, protocol_text");
+  if (!data) return null;
+
+  const text = `${symptomsText} ${structured.symptoms.join(" ")}`.toLowerCase();
+  let best: ProtocolRow | null = null;
+  let bestScore = 0;
+  for (const row of data as ProtocolRow[]) {
+    if (!filter(row)) continue;
+    const score = (row.keywords ?? []).filter((k) => text.includes(k.toLowerCase())).length;
+    if (score > bestScore) {
+      best = row;
+      bestScore = score;
+    }
+  }
+  return bestScore > 0 ? best : null;
+}
+
+/** YELLOW / GREEN: ordinary condition protocols only — never emergency stabilization rows. */
+export async function lookupProtocol(structured: StructuredSummary, symptomsText: string) {
+  return bestProtocolMatch(structured, symptomsText, (r) => !isStabilizationRow(r.condition_name));
+}
+
+/**
+ * RED only: fixed stabilization steps to perform WHILE WAITING for transport.
+ * Always sourced from first_aid_protocols — never LLM-generated.
+ */
+export async function lookupStabilization(structured: StructuredSummary, symptomsText: string) {
+  const matched = await bestProtocolMatch(structured, symptomsText, (r) => isStabilizationRow(r.condition_name));
+  if (matched) return matched;
+  const { data } = await supabaseAdmin
+    .from("first_aid_protocols")
+    .select("condition_name, keywords, otc_medicine, protocol_text")
+    .ilike("condition_name", `${STABILIZATION_PREFIX}%general%`)
+    .limit(1);
+  return (data?.[0] as ProtocolRow | undefined) ?? null;
+}
+
+/**
+ * True when the case sits close to the RED boundary. YELLOW medicine suggestions are
+ * suppressed in that case — caution over completeness.
+ */
+export function isRedAdjacent(structured: StructuredSummary, symptomsText: string, rules: string[]): boolean {
+  const v = structured.vitals;
+  const text = `${symptomsText} ${structured.symptoms.join(" ")} ${rules.join(" ")}`.toLowerCase();
+  if (typeof v.spo2 === "number" && v.spo2 < 95) return true;
+  if (typeof v.temp === "number" && v.temp >= 39) return true;
+  if (typeof v.pulse === "number" && (v.pulse > 110 || v.pulse < 50)) return true;
+  const bp = typeof v.bp === "string" ? v.bp.match(/^\s*(\d{2,3})\s*\/\s*(\d{2,3})\s*$/) : null;
+  if (bp && (Number(bp[1]) >= 160 || Number(bp[2]) >= 100)) return true;
+  return /chest pain|difficulty breathing|breathless|shortness of breath|unconscious|seizure|severe|bleeding|blood/.test(
+    text,
+  );
+}
+
+/* ---------------- Step 4b: Ayurvedic / home remedy lookup (GREEN only) ---------------- */
+
+export async function lookupAyurvedic(structured: StructuredSummary, symptomsText: string) {
+  const { data } = await supabaseAdmin
+    .from("ayurvedic_protocols")
+    .select("condition_name, keywords, remedy_text, source_reference");
+  if (!data) return null;
+
+  const text = `${symptomsText} ${structured.symptoms.join(" ")}`.toLowerCase();
+  let best: (typeof data)[number] | null = null;
+  let bestScore = 0;
+  for (const row of data) {
+    const score = (row.keywords ?? []).filter((k) => text.includes(k.toLowerCase())).length;
+    if (score > bestScore) {
+      best = row;
+      bestScore = score;
+    }
+  }
+  return bestScore > 0 ? best : null;
+}
+
+/* ---------------- Step 5: OpenFDA drug safety (GREEN only) ---------------- */
+
+export type DrugSafety = {
+  medicine: string;
+  contraindications?: string | undefined;
+  pediatric_use?: string | undefined;
+  geriatric_use?: string | undefined;
+  warnings?: string | undefined;
+  source: string;
+  note?: string | undefined;
+};
+
+export async function fetchDrugSafety(medicine: string): Promise<DrugSafety | null> {
+  try {
+    const url = `https://api.fda.gov/drug/label.json?search=openfda.brand_name:"${encodeURIComponent(
+      medicine,
+    )}"&limit=1`;
+    const res = await fetch(url, { signal: AbortSignal.timeout(3000) });
+    if (!res.ok) {
+      return { medicine, source: "openFDA", note: "No OpenFDA label record found for this medicine." };
+    }
+    const json = (await res.json()) as { results?: Array<Record<string, string[]>> };
+    const r = json.results?.[0];
+    if (!r) {
+      return { medicine, source: "openFDA", note: "No OpenFDA label record found for this medicine." };
+    }
+    const pick = (k: string) => (r[k]?.[0] ? r[k][0].slice(0, 600) : undefined);
+    return {
+      medicine,
+      contraindications: pick("contraindications"),
+      pediatric_use: pick("pediatric_use"),
+      geriatric_use: pick("geriatric_use"),
+      warnings: pick("warnings") ?? pick("warnings_and_cautions"),
+      source: "openFDA drug label API",
+    };
+  } catch {
+    return { medicine, source: "openFDA", note: "Drug safety lookup unavailable." };
+  }
+}
