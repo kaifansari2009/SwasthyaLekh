@@ -13,13 +13,17 @@ if (!fs.existsSync(publicDir)) {
 fs.writeFileSync(path.join(publicDir, ".nojekyll"), "");
 
 // 2. Find the client entry JS and CSS files
-const files = fs.readdirSync(assetsDir);
+const files = fs.existsSync(assetsDir) ? fs.readdirSync(assetsDir) : [];
 const mainJs = files.find((f) => f.startsWith("index-") && f.endsWith(".js")) || files.find((f) => f.endsWith(".js"));
 const mainCss = files.find((f) => f.endsWith(".css"));
 
 console.log("Client assets detected:", { mainJs, mainCss });
 
-// 3. SPA index.html supporting subpath hosting (/ruralaicare/)
+// Dynamic repository subpath for GitHub Pages
+const repoName = process.env.REPO_NAME || (process.env.GITHUB_REPOSITORY ? process.env.GITHUB_REPOSITORY.split("/")[1] : "SwasthyaLekh");
+const base = `/${repoName}/`;
+
+// 3. SPA index.html supporting subpath hosting
 const indexHtml = `<!DOCTYPE html>
 <html lang="en">
   <head>
@@ -27,9 +31,9 @@ const indexHtml = `<!DOCTYPE html>
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
     <title>SwasthyaLekh</title>
     <meta name="description" content="AI-assisted patient triage for rural health workers" />
-    <base href="/ruralaicare/" />
-    <link rel="icon" type="image/png" href="/ruralaicare/favicon.png" />
-    ${mainCss ? `<link rel="stylesheet" href="/ruralaicare/assets/${mainCss}" />` : ""}
+    <base href="${base}" />
+    <link rel="icon" type="image/png" href="${base}favicon.png" />
+    ${mainCss ? `<link rel="stylesheet" href="${base}assets/${mainCss}" />` : ""}
     <script type="text/javascript">
       // SPA route restorer from 404.html
       (function(l) {
@@ -46,7 +50,7 @@ const indexHtml = `<!DOCTYPE html>
   </head>
   <body>
     <div id="root"></div>
-    ${mainJs ? `<script type="module" src="/ruralaicare/assets/${mainJs}"></script>` : ""}
+    ${mainJs ? `<script type="module" src="${base}assets/${mainJs}"></script>` : ""}
   </body>
 </html>
 `;
@@ -77,4 +81,4 @@ const redirect404Html = `<!DOCTYPE html>
 fs.writeFileSync(path.join(publicDir, "index.html"), indexHtml);
 fs.writeFileSync(path.join(publicDir, "404.html"), redirect404Html);
 
-console.log("✅ index.html, 404.html (SPA router), and .nojekyll generated in .output/public");
+console.log(`✅ index.html, 404.html (SPA router base: ${base}), and .nojekyll generated in .output/public`);
