@@ -71,14 +71,23 @@ export async function syncSinglePendingIntake(
 
     if (!centre) {
       centre = defaultCentre;
-      try {
-        await supabase
-          .from("profiles")
-          .update({ health_centre: centre })
-          .eq("id", userId);
-      } catch (profErr) {
-        console.warn("[sync] Failed to auto-set profile health_centre:", profErr);
-      }
+    }
+
+    // Guarantee that public.profiles has a row for userId with this health_centre
+    // so the RLS policy: patients_insert_own_centre: health_centre = (SELECT p.health_centre FROM public.profiles p WHERE p.id = auth.uid()) passes!
+    try {
+      await supabase
+        .from("profiles")
+        .upsert(
+          {
+            id: userId,
+            health_centre: centre,
+            full_name: profile?.full_name?.trim() || "Staff",
+          },
+          { onConflict: "id" },
+        );
+    } catch (profErr) {
+      console.warn("[sync] Failed to auto-upsert profile health_centre:", profErr);
     }
 
     const mobile = item.mobile_number.trim();
