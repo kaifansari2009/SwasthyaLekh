@@ -2,7 +2,8 @@ import fs from "fs";
 import path from "path";
 
 const publicDir = path.resolve(".output/public");
-const assetsDir = path.join(publicDir, "assets");
+const repoName = process.env.REPO_NAME || (process.env.GITHUB_REPOSITORY ? process.env.GITHUB_REPOSITORY.split("/")[1] : "SwasthyaLekh");
+const base = `/${repoName}/`;
 
 if (!fs.existsSync(publicDir)) {
   console.error(".output/public directory does not exist. Run npm run build first.");
@@ -12,28 +13,8 @@ if (!fs.existsSync(publicDir)) {
 // 1. Create .nojekyll to prevent GitHub Pages from ignoring files starting with _
 fs.writeFileSync(path.join(publicDir, ".nojekyll"), "");
 
-// 2. Find the client entry JS and CSS files
-const files = fs.existsSync(assetsDir) ? fs.readdirSync(assetsDir) : [];
-const mainJs = files.find((f) => f.startsWith("index-") && f.endsWith(".js")) || files.find((f) => f.endsWith(".js"));
-const mainCss = files.find((f) => f.endsWith(".css"));
-
-console.log("Client assets detected:", { mainJs, mainCss });
-
-// Dynamic repository subpath for GitHub Pages
-const repoName = process.env.REPO_NAME || (process.env.GITHUB_REPOSITORY ? process.env.GITHUB_REPOSITORY.split("/")[1] : "SwasthyaLekh");
-const base = `/${repoName}/`;
-
-// 3. SPA index.html supporting subpath hosting
-const indexHtml = `<!DOCTYPE html>
-<html lang="en">
-  <head>
-    <meta charset="UTF-8" />
-    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-    <title>SwasthyaLekh</title>
-    <meta name="description" content="AI-assisted patient triage for rural health workers" />
-    <base href="${base}" />
-    <link rel="icon" type="image/png" href="${base}favicon.png" />
-    ${mainCss ? `<link rel="stylesheet" href="${base}assets/${mainCss}" />` : ""}
+// 2. SPA route restorer script to inject into HTML <head>
+const spaRestorerScript = `
     <script type="text/javascript">
       // SPA route restorer from 404.html
       (function(l) {
@@ -46,17 +27,63 @@ const indexHtml = `<!DOCTYPE html>
           );
         }
       }(window.location));
-    </script>
-  </head>
-  <body>
-    <div id="root"></div>
-    ${mainJs ? `<script type="module" src="${base}assets/${mainJs}"></script>` : ""}
-  </body>
-</html>
-`;
+    </script>`;
 
-// 4. SPA 404.html for GitHub Pages subpath routing
-const redirect404Html = `<!DOCTYPE html>
+// 3. Load SSR renderer and pre-render routes
+async function prerender() {
+  console.log(`Prerendering SSR routes for base: ${base}...`);
+  await import("../.output/server/index.mjs");
+  const ssr = globalThis.__nitro_vite_envs__?.["ssr"];
+
+  if (!ssr) {
+    console.error("SSR renderer not found in globalThis.__nitro_vite_envs__");
+    process.exit(1);
+  }
+
+  async function getHtml(routePath) {
+    const url = `http://localhost${routePath}`;
+    const res = await ssr.fetch(new Request(url));
+    if (res.status !== 200) {
+      console.warn(`Warning: ${routePath} returned status ${res.status}`);
+      return null;
+    }
+    let html = await res.text();
+    if (html.includes("<head>")) {
+      html = html.replace("<head>", `<head>${spaRestorerScript}`);
+    }
+    return html;
+  }
+
+  // Pre-render home
+  const homeHtml = await getHtml(base);
+  if (homeHtml) {
+    fs.writeFileSync(path.join(publicDir, "index.html"), homeHtml);
+    console.log(`✅ Pre-rendered index.html (${homeHtml.length} bytes)`);
+  } else {
+    console.error("Failed to pre-render home page");
+    process.exit(1);
+  }
+
+  // Pre-render intake
+  const intakeHtml = await getHtml(`${base}intake`);
+  if (intakeHtml) {
+    const intakeDir = path.join(publicDir, "intake");
+    if (!fs.existsSync(intakeDir)) fs.mkdirSync(intakeDir, { recursive: true });
+    fs.writeFileSync(path.join(intakeDir, "index.html"), intakeHtml);
+    console.log(`✅ Pre-rendered intake/index.html (${intakeHtml.length} bytes)`);
+  }
+
+  // Pre-render auth
+  const authHtml = await getHtml(`${base}auth`);
+  if (authHtml) {
+    const authDir = path.join(publicDir, "auth");
+    if (!fs.existsSync(authDir)) fs.mkdirSync(authDir, { recursive: true });
+    fs.writeFileSync(path.join(authDir, "index.html"), authHtml);
+    console.log(`✅ Pre-rendered auth/index.html (${authHtml.length} bytes)`);
+  }
+
+  // 4. SPA 404.html for GitHub Pages subpath routing
+  const redirect404Html = `<!DOCTYPE html>
 <html>
   <head>
     <meta charset="utf-8">
@@ -77,8 +104,11 @@ const redirect404Html = `<!DOCTYPE html>
   </body>
 </html>
 `;
+  fs.writeFileSync(path.join(publicDir, "404.html"), redirect404Html);
+  console.log(`✅ Generated 404.html and .nojekyll in .output/public`);
+}
 
-fs.writeFileSync(path.join(publicDir, "index.html"), indexHtml);
-fs.writeFileSync(path.join(publicDir, "404.html"), redirect404Html);
-
-console.log(`✅ index.html, 404.html (SPA router base: ${base}), and .nojekyll generated in .output/public`);
+prerender().catch((err) => {
+  console.error("Error during prerender:", err);
+  process.exit(1);
+});

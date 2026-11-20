@@ -7,11 +7,22 @@
 import { defineConfig } from "@lovable.dev/vite-tanstack-config";
 import { mcpPlugin } from "@lovable.dev/mcp-js/stacks/tanstack/vite";
 
+const repoName = process.env.REPO_NAME || "SwasthyaLekh";
+const isGhPages = process.env.DEPLOY_TARGET === "gh-pages";
+const base = isGhPages ? `/${repoName}/` : "/";
+const routerBase = isGhPages ? `/${repoName}` : "/";
+
 export default defineConfig({
   plugins: [mcpPlugin()],
+  vite: {
+    base,
+  },
   tanstackStart: {
     // Redirect TanStack Start's bundled server entry to src/server.ts (our SSR error wrapper).
     // nitro/vite builds from this
     server: { entry: "server" },
+    router: {
+      basepath: routerBase,
+    },
   },
 });
