@@ -892,13 +892,15 @@ function ReviewPage() {
                   </div>
                 ) : null}
 
-                {medSuggestion.reference ? (
+                {medSuggestion.reference && medSuggestion.reference.id ? (
                   <p className="mt-3 text-xs text-muted-foreground">
-                    Reference: knowledge base entry {medSuggestion.reference.id.slice(0, 8)} ·{" "}
-                    {(medSuggestion.reference.similarity * 100).toFixed(0)}% match
+                    Reference: knowledge base entry {String(medSuggestion.reference.id).slice(0, 8)}
+                    {typeof medSuggestion.reference.similarity === "number"
+                      ? ` · ${(medSuggestion.reference.similarity * 100).toFixed(0)}% match`
+                      : ""}
                     {medSuggestion.reference.content ? (
                       <>
-                        {" "}· <span className="italic">{medSuggestion.reference.content.slice(0, 160)}</span>
+                        {" "}· <span className="italic">{String(medSuggestion.reference.content).slice(0, 160)}</span>
                       </>
                     ) : null}
                   </p>

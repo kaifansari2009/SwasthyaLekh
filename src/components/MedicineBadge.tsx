@@ -23,21 +23,24 @@ export function useMedicineInventory() {
 
 /** True when the clinic holds usable, unexpired stock of a medicine. */
 export function findStock(rows: StockRow[], medicine: string): StockRow | null {
+  if (!medicine || typeof medicine !== "string") return null;
   const needle = medicine.toLowerCase().replace(/\s*\d+\s*(mg|ml|g)\b.*/i, "").trim();
   if (!needle) return null;
+  if (!Array.isArray(rows)) return null;
   const match = rows.find((r) => {
+    if (!r?.medicine_name || typeof r.medicine_name !== "string") return false;
     const name = r.medicine_name.toLowerCase();
     return name.includes(needle) || needle.includes(name.replace(/\s*\d+\s*(mg|ml|g)\b.*/i, "").trim());
   });
   if (!match) return null;
   const expired = match.expiry_date ? new Date(match.expiry_date) < new Date() : false;
-  return match.quantity > 0 && !expired ? match : null;
+  return (match.quantity ?? 0) > 0 && !expired ? match : null;
 }
 
 /** Inline live availability badge shown next to any suggested medicine name. */
 export function MedicineBadge({ medicine }: { medicine: string }) {
   const { data, isLoading } = useMedicineInventory();
-  if (isLoading || !data) return null;
+  if (isLoading || !data || !medicine) return null;
   const inStock = findStock(data, medicine);
 
   if (inStock) {
@@ -60,9 +63,10 @@ export function MedicineBadge({ medicine }: { medicine: string }) {
 /** Scans free text (e.g. a first-aid protocol) for medicines and shows their live availability. */
 export function MedicineMentions({ text }: { text: string }) {
   const { data } = useMedicineInventory();
-  if (!data) return null;
-  const lower = text.toLowerCase();
+  if (!data || !Array.isArray(data) || !text) return null;
+  const lower = String(text).toLowerCase();
   const mentioned = data.filter((r) => {
+    if (!r?.medicine_name || typeof r.medicine_name !== "string") return false;
     const base = r.medicine_name.toLowerCase().replace(/\s*\d+\s*(mg|ml|g)\b.*/i, "").trim();
     return base.length > 3 && lower.includes(base);
   });

@@ -45,13 +45,14 @@ export function getClinicalMedicineRecommendations(args: {
     };
   }
 
-  const text = `${symptomsText} ${(args.structuredSymptoms ?? []).join(" ")} ${args.historyText ?? ""}`.toLowerCase();
+  const text = `${symptomsText ?? ""} ${(args.structuredSymptoms ?? []).join(" ")} ${args.historyText ?? ""}`.toLowerCase();
   const isPregnant = Boolean(pregnancyStatus?.is_pregnant);
-  const hasKidneyCondition = chronicConditions.some((c) =>
-    /kidney|renal|nephro/i.test(c.condition_name),
+  const conditionsList = Array.isArray(chronicConditions) ? chronicConditions : [];
+  const hasKidneyCondition = conditionsList.some((c) =>
+    c && typeof c === "object" && c.condition_name && /kidney|renal|nephro/i.test(c.condition_name),
   );
-  const hasLiverCondition = chronicConditions.some((c) =>
-    /liver|hepat|cirrhosis/i.test(c.condition_name),
+  const hasLiverCondition = conditionsList.some((c) =>
+    c && typeof c === "object" && c.condition_name && /liver|hepat|cirrhosis/i.test(c.condition_name),
   );
 
   const medicines: SuggestedMedicineItem[] = [];
