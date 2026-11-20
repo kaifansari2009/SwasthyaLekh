@@ -381,7 +381,10 @@ function ReviewPage() {
 
   const actionableMeds = (medSuggestion?.medicines ?? []).filter((m) => !m.informational);
   const infoMeds = (medSuggestion?.medicines ?? []).filter((m) => m.informational);
-  const activeProtocolMatched = visit.protocol_matched || (!isRed ? fallbackClinical.protocolMatched : null);
+  const activeProtocolMatched =
+    (visit as any).protocol_matched ||
+    (rawMedSuggestion as any)?.protocol_matched ||
+    (!isRed ? fallbackClinical.protocolMatched : null);
   const activeProtocolText = visit.protocol_text || (!isRed ? fallbackClinical.protocolText : null);
   const activeAyurvedicRemedy = visit.ayurvedic_remedy || (!isRed ? fallbackClinical.ayurvedicRemedy : null);
   const activeAyurvedicCondition = visit.ayurvedic_condition || (!isRed ? fallbackClinical.ayurvedicCondition : null);
@@ -395,9 +398,9 @@ function ReviewPage() {
             status: fallbackClinical.status,
             message: fallbackClinical.message,
             condition: fallbackClinical.condition,
+            protocol_matched: activeProtocolMatched,
             medicines: fallbackClinical.medicines,
           } as any,
-          protocol_matched: activeProtocolMatched,
           protocol_text: activeProtocolText,
           ayurvedic_remedy: activeAyurvedicRemedy ?? null,
           ayurvedic_condition: activeAyurvedicCondition ?? null,

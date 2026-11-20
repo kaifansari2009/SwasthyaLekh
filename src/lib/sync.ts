@@ -190,12 +190,12 @@ export async function syncSinglePendingIntake(
         preliminary_assessment:
           "Synced from device offline records. Safety-critical triage calculated deterministically. Awaiting doctor clinical review.",
         ai_status: "unavailable",
-        protocol_matched: clinicalMed.protocolMatched,
         protocol_text: clinicalMed.protocolText,
         medicine_suggestion: {
           status: clinicalMed.status,
           message: clinicalMed.message,
           condition: clinicalMed.condition,
+          protocol_matched: clinicalMed.protocolMatched,
           medicines: clinicalMed.medicines,
         } as any,
         ayurvedic_remedy: clinicalMed.ayurvedicRemedy ?? null,

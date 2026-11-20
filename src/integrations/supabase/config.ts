@@ -27,3 +27,4 @@ export function resolveSupabasePublishableKey(): string {
   }
   return DEFAULT_SUPABASE_PUBLISHABLE_KEY;
 }
+
