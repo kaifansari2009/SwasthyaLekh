@@ -1,7 +1,8 @@
 import { createFileRoute, Link } from "@tanstack/react-router";
 import { useQuery, useQueryClient } from "@tanstack/react-query";
 import { useServerFn } from "@tanstack/react-start";
-import { useEffect, useRef, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
+import { getClinicalMedicineRecommendations } from "@/lib/clinical-medicines";
 import {
   AlertTriangle,
   ArrowDown,
@@ -349,7 +350,7 @@ function ReviewPage() {
   const structured = (visit.structured_summary ?? null) as Record<string, unknown> | null;
   const drug = (visit.drug_safety_info ?? null) as { medicine?: string; warnings?: string[] } | null;
   const isRed = tier === "RED";
-  const medSuggestion = (visit.medicine_suggestion ?? null) as {
+  const rawMedSuggestion = (visit.medicine_suggestion ?? null) as {
     status?: string;
     message?: string;
     condition?: string;
@@ -357,8 +358,53 @@ function ReviewPage() {
     reference?: { id: string; content: string; similarity: number };
     override_reason?: string;
   } | null;
+
+  const fallbackClinical = useMemo(() => {
+    const rawSymptoms = Array.isArray(structured?.symptoms)
+      ? (structured.symptoms as string[])
+      : [visit.symptoms_text];
+    return getClinicalMedicineRecommendations({
+      symptomsText: visit.symptoms_text,
+      structuredSymptoms: rawSymptoms,
+      historyText: visit.history_text || "",
+      age: patient?.age,
+      tier,
+      chronicConditions: (conditionData?.conditions as any) ?? [],
+      pregnancyStatus: pregnancy,
+    });
+  }, [structured?.symptoms, visit.symptoms_text, visit.history_text, patient?.age, tier, conditionData?.conditions, pregnancy]);
+
+  const medSuggestion =
+    rawMedSuggestion?.medicines && rawMedSuggestion.medicines.length > 0
+      ? rawMedSuggestion
+      : fallbackClinical;
+
   const actionableMeds = (medSuggestion?.medicines ?? []).filter((m) => !m.informational);
   const infoMeds = (medSuggestion?.medicines ?? []).filter((m) => m.informational);
+  const activeProtocolMatched = visit.protocol_matched || (!isRed ? fallbackClinical.protocolMatched : null);
+  const activeProtocolText = visit.protocol_text || (!isRed ? fallbackClinical.protocolText : null);
+  const activeAyurvedicRemedy = visit.ayurvedic_remedy || (!isRed ? fallbackClinical.ayurvedicRemedy : null);
+  const activeAyurvedicCondition = visit.ayurvedic_condition || (!isRed ? fallbackClinical.ayurvedicCondition : null);
+
+  useEffect(() => {
+    if (!visit.medicine_suggestion && fallbackClinical && visit.id) {
+      void supabase
+        .from("visits")
+        .update({
+          medicine_suggestion: {
+            status: fallbackClinical.status,
+            message: fallbackClinical.message,
+            condition: fallbackClinical.condition,
+            medicines: fallbackClinical.medicines,
+          } as any,
+          protocol_matched: activeProtocolMatched,
+          protocol_text: activeProtocolText,
+          ayurvedic_remedy: activeAyurvedicRemedy ?? null,
+          ayurvedic_condition: activeAyurvedicCondition ?? null,
+        })
+        .eq("id", visit.id);
+    }
+  }, [visit.id, visit.medicine_suggestion, fallbackClinical, activeProtocolMatched, activeProtocolText, activeAyurvedicRemedy, activeAyurvedicCondition]);
   const conditionData = (visit.chronic_conditions ?? null) as
     | { conditions?: Array<{ condition_name: string }>; alerts?: Array<{ condition: string; note: string }>; guardrails?: string[] }
     | null;
@@ -665,22 +711,24 @@ function ReviewPage() {
               </div>
             ) : null}
 
-            {visit.protocol_text ? (
+            {activeProtocolText ? (
               <div className="mt-4">
                 <p className="text-xs font-semibold uppercase tracking-wide text-risk-amber">
                   {isRed
                     ? "Emergency stabilization steps — while waiting for transport (from the clinic protocol library, not AI-written)"
-                    : "First-aid protocol (from the clinic protocol library, not AI-written)"}
+                    : activeProtocolMatched
+                      ? `Clinical protocol: ${activeProtocolMatched}`
+                      : "First-aid protocol (from the clinic protocol library, not AI-written)"}
                 </p>
                 <ol className="mt-2 list-decimal space-y-1 pl-5 text-sm">
-                  {visit.protocol_text
+                  {activeProtocolText
                     .split("\n")
                     .filter((line) => line.trim())
                     .map((line) => (
                       <li key={line}>{line.replace(/^\d+[.)]\s*/, "")}</li>
                     ))}
                 </ol>
-                {isRed ? null : <MedicineMentions text={visit.protocol_text} />}
+                {isRed ? null : <MedicineMentions text={activeProtocolText} />}
               </div>
             ) : !isRed ? (
               <p className="mt-4 rounded-xl border border-dashed border-border bg-card p-3 text-sm text-muted-foreground">
@@ -696,16 +744,16 @@ function ReviewPage() {
               </div>
             ) : null}
 
-            {!isRed && visit.ayurvedic_remedy ? (
+            {!isRed && activeAyurvedicRemedy ? (
               <div className="mt-4 rounded-xl border border-risk-green/30 bg-card p-4">
                 <p className="flex items-center gap-1.5 text-xs font-semibold uppercase tracking-wide text-risk-green">
                   <Leaf className="size-3.5" aria-hidden /> Ayurvedic / home remedy suggestion (complementary — not a
                   substitute for treatment)
                 </p>
-                {visit.ayurvedic_condition ? (
-                  <p className="mt-2 text-sm font-medium">{visit.ayurvedic_condition}</p>
+                {activeAyurvedicCondition ? (
+                  <p className="mt-2 text-sm font-medium">{activeAyurvedicCondition}</p>
                 ) : null}
-                <p className="mt-1 whitespace-pre-wrap text-sm">{visit.ayurvedic_remedy}</p>
+                <p className="mt-1 whitespace-pre-wrap text-sm">{activeAyurvedicRemedy}</p>
                 <p className="mt-2 text-xs text-muted-foreground">
                   From the clinic's fixed remedy library{visit.ayurvedic_source ? ` · ${visit.ayurvedic_source}` : ""} — not
                   AI-written. Always follow the doctor's decision.
@@ -734,46 +782,55 @@ function ReviewPage() {
               </div>
             ) : null}
 
-            {/* Suggested medicines — retrieval-only, gated by the deterministic risk tier */}
-            {tier === "YELLOW" && !drug ? (
-              <div className="mt-4 rounded-xl border border-risk-amber/30 bg-card p-4">
-                <p className="text-xs font-semibold uppercase tracking-wide text-risk-amber">
-                  Doctor consultation recommended
-                </p>
-                <p className="mt-1 text-sm">
-                  No medicine suggested for this case — no protocol medicine confidently matched, or the findings sit
-                  close to the emergency threshold, so the doctor decides treatment.
-                </p>
-                {visit.preliminary_assessment ? (
-                  <p className="mt-2 text-xs text-muted-foreground">
-                    Symptoms are reviewed against the reference dataset above; treatment remains the doctor's call.
-                  </p>
-                ) : null}
-              </div>
-            ) : null}
-
-            {tier === "GREEN" && medSuggestion ? (
+            {/* Suggested medicines */}
+            {!isRed && medSuggestion && medSuggestion.medicines && medSuggestion.medicines.length > 0 ? (
               <div className="mt-4 rounded-xl border border-border bg-card p-4">
-                <p className="flex items-center gap-1.5 text-xs font-semibold uppercase tracking-wide text-muted-foreground">
-                  <Pill className="size-3.5" aria-hidden /> Suggested medicines
-                </p>
+                <div className="flex items-center justify-between">
+                  <p className="flex items-center gap-1.5 text-xs font-semibold uppercase tracking-wide text-muted-foreground">
+                    <Pill className="size-3.5" aria-hidden /> Suggested medicines
+                  </p>
+                  <span className="rounded-full bg-primary/10 px-2 py-0.5 text-[11px] font-medium text-primary">
+                    Doctor Review Required
+                  </span>
+                </div>
 
                 {medSuggestion.status === "suggested" ? (
                   <>
                     <p className="mt-2 text-sm font-semibold text-risk-green">
-                      Suggested (from reference database) — Pending Doctor Approval
+                      Suggested (from Essential Primary Formulary) — Pending Doctor Approval
                     </p>
                     {medSuggestion.condition ? (
                       <p className="mt-1 text-xs text-muted-foreground">
                         Consistent with: <b>{medSuggestion.condition}</b>
                       </p>
                     ) : null}
-                    <ul className="mt-2 space-y-1.5 text-sm">
+                    <ul className="mt-3 space-y-2 text-sm">
                       {actionableMeds.map((m) => (
-                        <li key={m.name} className="flex flex-wrap items-center gap-1">
-                          <b>{m.name}</b>
-                          <MedicineBadge medicine={m.name} />
-                          {m.detail ? <span className="text-xs text-muted-foreground">— {m.detail}</span> : null}
+                        <li
+                          key={m.name}
+                          className="flex flex-wrap items-center justify-between gap-2 rounded-lg border border-border/60 bg-muted/20 p-2.5"
+                        >
+                          <div className="flex-1">
+                            <div className="flex items-center gap-1.5">
+                              <b>{m.name}</b>
+                              <MedicineBadge medicine={m.name} />
+                            </div>
+                            {m.detail ? <p className="mt-0.5 text-xs text-muted-foreground">{m.detail}</p> : null}
+                          </div>
+                          {isDoctor && !finalized ? (
+                            <Button
+                              type="button"
+                              size="sm"
+                              variant="outline"
+                              className="h-7 text-xs"
+                              onClick={() => {
+                                const addText = `• ${m.name}${m.detail ? `: ${m.detail}` : ""}\n`;
+                                setNotes((prev) => (prev ? `${prev.trim()}\n${addText}` : addText));
+                              }}
+                            >
+                              + Add to notes
+                            </Button>
+                          ) : null}
                         </li>
                       ))}
                     </ul>
@@ -791,13 +848,41 @@ function ReviewPage() {
                 {infoMeds.length > 0 ? (
                   <div className="mt-3 rounded-lg border border-dashed border-border p-3">
                     <p className="text-xs font-semibold uppercase tracking-wide text-muted-foreground">
-                      Informational only — not actionable by the health worker
+                      Doctor Prescription Only / Guardrail Active
                     </p>
-                    <ul className="mt-2 space-y-1 text-sm text-muted-foreground">
+                    <ul className="mt-2 space-y-2 text-sm">
                       {infoMeds.map((m) => (
-                        <li key={m.name}>
-                          <b>{m.name}</b>
-                          {m.reason ? ` — ${m.reason}` : ""}
+                        <li
+                          key={m.name}
+                          className="flex flex-wrap items-center justify-between gap-2 rounded-lg border border-border/40 p-2"
+                        >
+                          <div className="flex-1">
+                            <div className="flex items-center gap-1.5">
+                              <b>{m.name}</b>
+                              <MedicineBadge medicine={m.name} />
+                              <span className="rounded bg-amber-500/10 px-1.5 py-0.5 text-[10px] font-medium text-amber-600">
+                                Rx Required
+                              </span>
+                            </div>
+                            {m.detail ? <p className="mt-0.5 text-xs text-muted-foreground">{m.detail}</p> : null}
+                            {m.reason ? (
+                              <p className="mt-0.5 text-xs text-amber-700 dark:text-amber-400">⚠️ {m.reason}</p>
+                            ) : null}
+                          </div>
+                          {isDoctor && !finalized ? (
+                            <Button
+                              type="button"
+                              size="sm"
+                              variant="outline"
+                              className="h-7 text-xs"
+                              onClick={() => {
+                                const addText = `• [Rx Prescribed] ${m.name}${m.detail ? `: ${m.detail}` : ""}\n`;
+                                setNotes((prev) => (prev ? `${prev.trim()}\n${addText}` : addText));
+                              }}
+                            >
+                              + Prescribe
+                            </Button>
+                          ) : null}
                         </li>
                       ))}
                     </ul>
@@ -807,13 +892,26 @@ function ReviewPage() {
                 {medSuggestion.reference ? (
                   <p className="mt-3 text-xs text-muted-foreground">
                     Reference: knowledge base entry {medSuggestion.reference.id.slice(0, 8)} ·{" "}
-                    {(medSuggestion.reference.similarity * 100).toFixed(0)}% match ·{" "}
-                    <span className="italic">{medSuggestion.reference.content.slice(0, 160)}</span>
+                    {(medSuggestion.reference.similarity * 100).toFixed(0)}% match
+                    {medSuggestion.reference.content ? (
+                      <>
+                        {" "}· <span className="italic">{medSuggestion.reference.content.slice(0, 160)}</span>
+                      </>
+                    ) : null}
                   </p>
                 ) : null}
                 <p className="mt-1 text-xs text-muted-foreground">
                   Retrieved from the clinic's reference database — never AI-generated, and never applied without the
                   doctor's sign-off.
+                </p>
+              </div>
+            ) : tier === "YELLOW" && !drug ? (
+              <div className="mt-4 rounded-xl border border-risk-amber/30 bg-card p-4">
+                <p className="text-xs font-semibold uppercase tracking-wide text-risk-amber">
+                  Doctor consultation recommended
+                </p>
+                <p className="mt-1 text-sm">
+                  Findings sit close to the emergency threshold. Treatment remains the doctor's call.
                 </p>
               </div>
             ) : null}

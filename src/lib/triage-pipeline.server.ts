@@ -334,7 +334,42 @@ export async function runIntakePipeline(input: IntakeInput, userId: string) {
       assessment,
       conditions: conditionCtx,
     });
-    if (medicineSuggestion.override_reason) {
+
+    if (!medicineSuggestion || medicineSuggestion.medicines.length === 0 || medicineSuggestion.status === "unavailable" || medicineSuggestion.status === "no_match") {
+      const { getClinicalMedicineRecommendations } = await import("./clinical-medicines");
+      const fallbackMed = getClinicalMedicineRecommendations({
+        symptomsText: input.symptoms,
+        structuredSymptoms: structured.symptoms,
+        historyText: input.history,
+        age: input.age,
+        tier: risk.tier as "GREEN" | "YELLOW" | "RED",
+        chronicConditions: conditionCtx.chronic,
+        pregnancyStatus: conditionCtx.pregnancy,
+      });
+      medicineSuggestion = {
+        status: fallbackMed.status,
+        message: fallbackMed.message,
+        condition: fallbackMed.condition,
+        medicines: fallbackMed.medicines,
+      };
+      if (!protocol && fallbackMed.protocolMatched && fallbackMed.protocolText) {
+        protocol = {
+          condition_name: fallbackMed.protocolMatched,
+          keywords: [],
+          otc_medicine: fallbackMed.medicines[0]?.name || null,
+          protocol_text: fallbackMed.protocolText,
+        };
+      }
+      if (!ayurvedic && fallbackMed.ayurvedicRemedy) {
+        ayurvedic = {
+          condition_name: fallbackMed.ayurvedicCondition || "Supportive Care",
+          remedy_text: fallbackMed.ayurvedicRemedy,
+          source_reference: "Primary Care Clinical Formulary",
+        };
+      }
+    }
+
+    if (medicineSuggestion?.override_reason) {
       risk.rules.push(`No medicine suggested — ${medicineSuggestion.override_reason}`);
     }
   }

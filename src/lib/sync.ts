@@ -2,6 +2,7 @@ import { supabase } from "@/integrations/supabase/client";
 import type { Profile } from "./auth";
 import type { PendingIntake } from "./offline";
 import { applyConditionModifiers, scoreRisk } from "./triage-scoring";
+import { getClinicalMedicineRecommendations } from "./clinical-medicines";
 
 export type SyncResult = {
   success: boolean;
@@ -159,6 +160,17 @@ export async function syncSinglePendingIntake(
       }
     }
 
+    // Compute clinical medicine recommendations and protocols
+    const clinicalMed = getClinicalMedicineRecommendations({
+      symptomsText: item.symptoms,
+      structuredSymptoms: [item.symptoms],
+      historyText: item.history,
+      age: item.age,
+      tier: risk.tier as "GREEN" | "YELLOW" | "RED",
+      chronicConditions: item.chronic_conditions ?? [],
+      pregnancyStatus: item.pregnancy_status ?? null,
+    });
+
     // Insert visit
     const { data: visit, error: vError } = await supabase
       .from("visits")
@@ -178,6 +190,16 @@ export async function syncSinglePendingIntake(
         preliminary_assessment:
           "Synced from device offline records. Safety-critical triage calculated deterministically. Awaiting doctor clinical review.",
         ai_status: "unavailable",
+        protocol_matched: clinicalMed.protocolMatched,
+        protocol_text: clinicalMed.protocolText,
+        medicine_suggestion: {
+          status: clinicalMed.status,
+          message: clinicalMed.message,
+          condition: clinicalMed.condition,
+          medicines: clinicalMed.medicines,
+        } as any,
+        ayurvedic_remedy: clinicalMed.ayurvedicRemedy ?? null,
+        ayurvedic_condition: clinicalMed.ayurvedicCondition ?? null,
         chronic_conditions: (item.chronic_conditions?.length
           ? { conditions: item.chronic_conditions, alerts: [], guardrails: [] }
           : null) as any,
